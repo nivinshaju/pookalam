@@ -146,6 +146,36 @@ input{font:inherit;color:inherit}
   position:absolute;inset:0;width:100%;height:100%;display:block;overflow:visible;
   pointer-events:none;z-index:5;will-change:transform;
 }
+.zoomControls{
+  position:absolute;top:13px;right:13px;z-index:16;display:flex;align-items:center;
+  padding:4px;border:1px solid rgba(24,56,44,.16);border-radius:999px;background:var(--card);
+  box-shadow:0 5px 14px rgba(24,56,44,.14);
+}
+.zoomBtn,.zoomLevel{
+  min-width:30px;height:30px;border:none;border-radius:50%;display:grid;place-items:center;
+  color:#22503c;background:transparent;
+}
+.zoomBtn{padding:0;transition:background .16s ease,color .16s ease,transform .16s ease}
+.zoomBtn:hover{color:#174d3a;background:#fff1c9;transform:translateY(-1px)}
+.zoomBtn:disabled{opacity:.38;cursor:default;transform:none;background:transparent}
+.zoomBtn svg{width:16px;height:16px}
+.zoomLevel{
+  min-width:38px;border-radius:999px;color:#8a5c0c;font-size:9px;font-weight:800;
+  letter-spacing:.05em;font-variant-numeric:tabular-nums;cursor:pointer;
+}
+.zoomLevel:hover{background:#fff1c9}
+/* A zoomed board is clipped to the mat, so magnified blooms stay inside the
+   circle instead of spilling over the page. Drag (or two-finger drag) to pan. */
+.canvasWrap.zoomed #board,.canvasWrap.zoomed #dragSvg{overflow:hidden}
+.canvasWrap.panning #board{cursor:grabbing}
+.zoomHint{
+  position:absolute;top:50px;right:13px;z-index:16;padding:5px 10px;border-radius:999px;
+  border:1px solid rgba(24,56,44,.14);background:var(--card);color:#8a5c0c;
+  font-size:8.5px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;
+  white-space:nowrap;pointer-events:none;opacity:0;transform:translateY(-4px);
+  transition:opacity .2s ease,transform .2s ease;
+}
+.canvasWrap.zoomed .zoomHint{opacity:1;transform:none}
 #board.mode-sketch{cursor:cell}
 #board.mode-erase{cursor:not-allowed}
 .flower-node{cursor:grab}
@@ -836,6 +866,10 @@ footer.foot b{color:var(--ochre-d);font-weight:700}
   /* ---------- the mat ---------- */
   .canvasWrap{width:min(82vw,420px,max(268px,calc(100vh - 352px)))}
   #board{outline-width:6px;outline-offset:3px}
+  .zoomControls{top:9px;right:5px;padding:3px}
+  .zoomHint{top:42px;right:5px;font-size:8px;padding:4px 8px}
+  .zoomBtn,.zoomLevel{min-width:28px;height:28px}
+  .zoomLevel{min-width:35px;font-size:8.5px}
   .emptyState{margin:7%;padding:13%;gap:7px}
   .emptyState .crest{gap:9px;color:#d3a028;font-size:17px;line-height:1}
   .emptyState .crest::before,.emptyState .crest::after{
@@ -1432,6 +1466,17 @@ footer.foot .shareCall p b{color:#8a5c0c;font-weight:700}
         <g id="dragLayer" filter="url(#softShadow)"></g>
       </svg>
 
+      <div class="zoomControls" role="group" aria-label="Pookalam zoom">
+        <button class="zoomBtn" id="btnZoomOut" type="button" aria-label="Zoom out" title="Zoom out (scroll or pinch)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M5 12h14"/></svg>
+        </button>
+        <button class="zoomLevel" id="btnZoomReset" type="button" aria-label="Reset zoom to fit" title="Fit the whole pookalam">100%</button>
+        <button class="zoomBtn" id="btnZoomIn" type="button" aria-label="Zoom in" title="Zoom in (scroll or pinch)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <div class="zoomHint" id="zoomHint" aria-hidden="true">Drag to pan</div>
+
       <div class="emptyState" id="emptyState">
         <span class="crest" aria-hidden="true">
           <svg class="big" viewBox="0 0 38 38"><use href="#artLotusMark"/></svg>
@@ -1934,6 +1979,7 @@ const VB = 800;                 // svg viewBox size
 const CX = 400, CY = 400;       // canvas centre
 const R_BOARD = 372;            // pookalam radius
 const ART = 50;                 // half-size of a flower image in defs space
+const ZOOM_MIN = 1, ZOOM_MAX = 3, ZOOM_STEP = .25;
 
 /* The flower set. Each entry is one of the supplied photographs: `reach` is the
    bloom's radius on the board at scale 1, `color` is the tone it reads as (used
@@ -2361,11 +2407,60 @@ function updateCounter() {
 /* ============================================================
    7. PLACEMENT
    ============================================================ */
-function boardPoint(ev) {
-  const r = D.board.getBoundingClientRect();
-  const k = VB / r.width;
-  return { x: (ev.clientX - r.left) * k, y: (ev.clientY - r.top) * k };
+/* --- view: zoom + pan ------------------------------------------------------
+   The board is a single 800×800 svg, so zooming in is just a smaller viewBox
+   and panning is that window sliding across the mat. viewX/viewY hold the
+   window's top-left corner in board units. */
+let boardZoom = 1, viewX = 0, viewY = 0;
+
+/** width (= height) of the visible board window, in board units */
+function viewSpan() { return VB / boardZoom; }
+
+function applyView() {
+  const visible = viewSpan();
+  const maxOff = VB - visible;
+  viewX = clamp(viewX, 0, maxOff);
+  viewY = clamp(viewY, 0, maxOff);
+  const viewBox = round2(viewX) + ' ' + round2(viewY) + ' ' + round2(visible) + ' ' + round2(visible);
+  D.board.setAttribute('viewBox', viewBox);
+  D.dragSvg.setAttribute('viewBox', viewBox);
+  D.zoomLevel.textContent = Math.round(boardZoom * 100) + '%';
+  D.btnZoomOut.disabled = boardZoom <= ZOOM_MIN + .001;
+  D.btnZoomIn.disabled = boardZoom >= ZOOM_MAX - .001;
+  D.canvasWrap.classList.toggle('zoomed', boardZoom > ZOOM_MIN + .001);
 }
+
+/** Zoom to `next`, keeping the board point `anchor` under the same pixel.
+    Without an anchor the current centre of the view stays put. */
+function setBoardZoom(next, anchor) {
+  const before = viewSpan();
+  const z = clamp(round2(next), ZOOM_MIN, ZOOM_MAX);
+  if (z === boardZoom) { applyView(); return; }
+  const a = anchor || { x: viewX + before / 2, y: viewY + before / 2 };
+  const fx = (a.x - viewX) / before, fy = (a.y - viewY) / before;
+  boardZoom = z;
+  const after = viewSpan();
+  viewX = a.x - fx * after;
+  viewY = a.y - fy * after;
+  applyView();
+}
+
+/** back to the whole pookalam, centred */
+function resetView() { boardZoom = 1; viewX = 0; viewY = 0; applyView(); }
+
+/** board units per css pixel at the current zoom */
+function boardScale() {
+  const w = D.board.getBoundingClientRect().width || 1;
+  return viewSpan() / w;
+}
+
+function boardPointAt(clientX, clientY) {
+  const r = D.board.getBoundingClientRect();
+  const k = viewSpan() / (r.width || 1);
+  return { x: viewX + (clientX - r.left) * k, y: viewY + (clientY - r.top) * k };
+}
+
+function boardPoint(ev) { return boardPointAt(ev.clientX, ev.clientY); }
 
 function snapPoint(p) {
   if (!S.grid) return p;
@@ -2486,7 +2581,86 @@ function clearAllFlowers() {
 let drag = null;
 let stroke = null;
 
+/* --- gesture bookkeeping ---------------------------------------------------
+   pointers holds every finger/stylus currently on the board. Two of them mean
+   a pinch (zoom + pan); one of them can become a pan of a zoomed board, and a
+   press that never travels far enough ends up placing a flower. */
+const pointers = new Map();
+let pinch = null;
+let pan = null;
+let tap = null;
+const PAN_SLOP = 7;            // css px of travel before a press counts as a drag
+
+function isZoomed() { return boardZoom > ZOOM_MIN + .001; }
+
+function twoPointers() { return [...pointers.values()].slice(0, 2); }
+function pinchDist(l) { return Math.hypot(l[0].x - l[1].x, l[0].y - l[1].y); }
+function pinchMid(l) { return { x: (l[0].x + l[1].x) / 2, y: (l[0].y + l[1].y) / 2 }; }
+
+function startPinch() {
+  const l = twoPointers();
+  const mid = pinchMid(l);
+  pinch = { dist: Math.max(pinchDist(l), 1), zoom: boardZoom, anchor: boardPointAt(mid.x, mid.y) };
+}
+
+function startPan(clientX, clientY, id) {
+  pan = { id: id, sx: clientX, sy: clientY, vx: viewX, vy: viewY, k: boardScale() };
+  D.canvasWrap.classList.add('panning');
+}
+
+function movePan(clientX, clientY) {
+  viewX = pan.vx - (clientX - pan.sx) * pan.k;
+  viewY = pan.vy - (clientY - pan.sy) * pan.k;
+  applyView();
+}
+
+function endPan() {
+  pan = null;
+  D.canvasWrap.classList.remove('panning');
+}
+
+function endStroke() {
+  if (!stroke) return;
+  if (stroke.length < 2) S.strokes.pop();
+  else { S.usedSketch = true; commit(); }
+  stroke = null;
+  renderSketch();
+  updateEmptyState();
+}
+
+function endDrag() {
+  if (!drag) return;
+  drag.node.classList.remove('dragging');
+  if (drag.node.parentNode === D.dragLayer) D.flowers.appendChild(drag.node);
+  D.dragLayer.innerHTML = '';
+  D.dragRing = null;
+  renderSelection();
+  if (drag.moved) commit();
+  drag = null;
+}
+
+/** Hand control over to a pinch: close out whatever one finger was doing. */
+function yieldToPinch() {
+  endStroke();
+  endDrag();
+  tap = null;
+  if (pan) endPan();
+}
+
 function onPointerDown(ev) {
+  pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+  /* two fingers pinch-zoom and pan — never place a flower */
+  if (pointers.size === 2) { ev.preventDefault(); yieldToPinch(); startPinch(); return; }
+  if (pointers.size > 2) return;
+
+  /* middle-button drag pans the board */
+  if (ev.pointerType === 'mouse' && ev.button === 1) {
+    ev.preventDefault();
+    D.board.setPointerCapture(ev.pointerId);
+    startPan(ev.clientX, ev.clientY, ev.pointerId);
+    return;
+  }
   if (ev.button !== undefined && ev.button !== 0 && ev.pointerType === 'mouse') return;
   begin();
   const p = boardPoint(ev);
@@ -2542,10 +2716,49 @@ function onPointerDown(ev) {
   if (S.erase) { S.selected = null; renderSelection(); return; }
   ev.preventDefault();
   if (remaining() <= 0) { toast('All ' + MAX_FLOWERS + ' flowers are placed. Delete one to make room.'); return; }
+  /* On touch, and on a zoomed board where dragging means panning, hold the
+     flower back until the press turns out to be a tap rather than a drag. */
+  if (ev.pointerType !== 'mouse' || isZoomed()) {
+    D.board.setPointerCapture(ev.pointerId);
+    tap = { id: ev.pointerId, sx: ev.clientX, sy: ev.clientY };
+    return;
+  }
   placeAt(p);
 }
 
 function onPointerMove(ev) {
+  if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+  /* pinch: scale by finger spread, and keep the anchor under the midpoint */
+  if (pinch) {
+    const l = twoPointers();
+    if (l.length < 2) return;
+    ev.preventDefault();
+    setBoardZoom(pinch.zoom * (pinchDist(l) / pinch.dist), pinch.anchor);
+    const mid = pinchMid(l);
+    const r = D.board.getBoundingClientRect();
+    const k = viewSpan() / (r.width || 1);
+    viewX = pinch.anchor.x - (mid.x - r.left) * k;
+    viewY = pinch.anchor.y - (mid.y - r.top) * k;
+    applyView();
+    return;
+  }
+
+  if (pan) { ev.preventDefault(); movePan(ev.clientX, ev.clientY); return; }
+
+  /* a press that travels turns into a pan (when zoomed) instead of a flower */
+  if (tap) {
+    if (Math.hypot(ev.clientX - tap.sx, ev.clientY - tap.sy) > PAN_SLOP) {
+      const t = tap;
+      tap = null;
+      if (isZoomed()) {
+        startPan(t.sx, t.sy, t.id);
+        movePan(ev.clientX, ev.clientY);
+      }
+    }
+    return;
+  }
+
   if (stroke) {
     const p = boardPoint(ev);
     const last = stroke[stroke.length - 1];
@@ -2568,23 +2781,24 @@ function onPointerMove(ev) {
 }
 
 function onPointerUp(ev) {
-  if (stroke) {
-    if (stroke.length < 2) S.strokes.pop();
-    else { S.usedSketch = true; commit(); }
-    stroke = null;
-    renderSketch();
-    updateEmptyState();
+  pointers.delete(ev.pointerId);
+
+  if (pinch) {
+    /* lifting one finger of a pinch leaves the other one idle, not placing */
+    if (pointers.size >= 2) startPinch(); else pinch = null;
     return;
   }
-  if (drag) {
-    drag.node.classList.remove('dragging');
-    if (drag.node.parentNode === D.dragLayer) D.flowers.appendChild(drag.node);
-    D.dragLayer.innerHTML = '';
-    D.dragRing = null;
-    renderSelection();
-    if (drag.moved) commit();
-    drag = null;
+  if (pan && pan.id === ev.pointerId) { endPan(); return; }
+  if (tap && tap.id === ev.pointerId) {
+    tap = null;
+    if (ev.type === 'pointerup') {
+      const p = boardPointAt(ev.clientX, ev.clientY);
+      if (Math.hypot(p.x - CX, p.y - CY) <= R_BOARD + 6 && remaining() > 0) placeAt(p);
+    }
+    return;
   }
+  if (stroke) { endStroke(); return; }
+  if (drag) endDrag();
 }
 
 /* ============================================================
@@ -3828,6 +4042,39 @@ function wire() {
   D.board.addEventListener('pointerup', onPointerUp);
   D.board.addEventListener('pointercancel', onPointerUp);
   D.board.addEventListener('contextmenu', e => e.preventDefault());
+  /* a pointer that ends away from the board must not linger in the map */
+  ['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, ev => {
+    if (!pointers.has(ev.pointerId)) return;
+    pointers.delete(ev.pointerId);
+    if (pinch && pointers.size < 2) pinch = null;
+    if (pan && pan.id === ev.pointerId) endPan();
+    if (tap && tap.id === ev.pointerId) tap = null;
+  }));
+
+  D.board.addEventListener('lostpointercapture', ev => {
+    /* safety net: never leave a gesture half-finished */
+    if (pan && pan.id === ev.pointerId) endPan();
+    if (tap && tap.id === ev.pointerId) tap = null;
+    pointers.delete(ev.pointerId);
+    if (pinch && pointers.size < 2) pinch = null;
+  });
+
+  D.btnZoomOut.addEventListener('click', () => setBoardZoom(boardZoom - ZOOM_STEP));
+  D.btnZoomIn.addEventListener('click', () => setBoardZoom(boardZoom + ZOOM_STEP));
+  D.btnZoomReset.addEventListener('click', resetView);
+
+  /* Wheel / trackpad zoom, centred on the pointer (a trackpad pinch arrives as
+     ctrl+wheel). When there is nothing left to zoom the scroll is handed back
+     to the page, so the canvas never traps it. */
+  D.canvasWrap.addEventListener('wheel', ev => {
+    const out = ev.deltaY > 0;
+    if (out && boardZoom <= ZOOM_MIN + .001) return;
+    if (!out && boardZoom >= ZOOM_MAX - .001) return;
+    ev.preventDefault();
+    const raw = ev.deltaMode === 1 ? ev.deltaY * 16 : (ev.deltaMode === 2 ? ev.deltaY * 400 : ev.deltaY);
+    const factor = Math.exp(-clamp(raw, -240, 240) * (ev.ctrlKey ? .006 : .0026));
+    setBoardZoom(boardZoom * factor, boardPointAt(ev.clientX, ev.clientY));
+  }, { passive: false });
 
   /* palette */
   D.flowerGrid.addEventListener('click', e => {
@@ -4139,6 +4386,7 @@ function wire() {
    ============================================================ */
 function init() {
   D.board = $('#board');
+  D.dragSvg = $('#dragSvg');
   D.defs = $('#defs');
   D.bg = $('#bgLayer');
   D.grid = $('#gridLayer');
@@ -4169,6 +4417,11 @@ function init() {
   D.chipTimer = $('#chipTimer');
   D.timerTxt = $('#timerTxt');
   D.dock = $('.dock');
+  D.canvasWrap = $('#canvasWrap');
+  D.btnZoomOut = $('#btnZoomOut');
+  D.btnZoomIn = $('#btnZoomIn');
+  D.btnZoomReset = $('#btnZoomReset');
+  D.zoomLevel = $('#btnZoomReset');
 
   const cl = $('#challengeLbl');
   if (cl) cl.textContent = 'Start ' + CHALLENGE_MIN + '-minute challenge';
@@ -4180,6 +4433,7 @@ function init() {
   buildFlowerPalette();
   buildSwatches();
   buildTemplateCards();
+  resetView();
   wire();
 
   const had = restoreCurrent();
